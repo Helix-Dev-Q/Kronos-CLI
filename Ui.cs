@@ -8,38 +8,55 @@ internal static class Ui
 
     public sealed record Button(string Label, string? Value = null, Func<string?>? Action = null);
 
-    readonly record struct Entry(DateTime Time, Level Level, string Text);
+    public sealed record MenuItem(string Key, string Label, string Description, string? Short = null);
+
+    readonly record struct Entry(DateTime Time, Level Level, string Text, string? Topic, bool Keep);
     readonly record struct Span(string Text, string Fg, string? Bg = null);
 
     enum HitKind { Command, Button, Tab, Follow, Body, Bar }
-    readonly record struct Hit(int Row, int Left, int Right, HitKind Kind, int Pane = 0, string? Value = null, Button? Button = null);
+    readonly record struct Hit(int Row, int Left, int Right, HitKind Kind, int Pane = 0, string? Value = null, Button? Button = null, int Item = -1);
 
     const string Esc = "\x1b";
     const string Reset = Esc + "[0m";
     const string MouseOn = Esc + "[?1000h" + Esc + "[?1002h" + Esc + "[?1006h";
     const string MouseOff = Esc + "[?1006l" + Esc + "[?1002l" + Esc + "[?1000l";
 
-    static readonly string Backdrop = Bg(8, 8, 8);
-    static readonly string Panel = Bg(20, 20, 20);
-    static readonly string ChipBg = Bg(46, 46, 46);
-    static readonly string GreyBg = Bg(150, 150, 150);
-    static readonly string KeyBg = Bg(205, 205, 205);
-    static readonly string LightBg = Bg(235, 235, 235);
+    static readonly string Backdrop = Bg(9, 9, 14);
+    static readonly string Panel = Bg(17, 17, 25);
+    static readonly string Side = Bg(23, 23, 35);
+    static readonly string ChipBg = Bg(40, 40, 58);
+    static readonly string SelectBg = Bg(50, 43, 94);
+    static readonly string KeyBg = Bg(205, 205, 222);
+    static readonly string AccentBg = Bg(139, 123, 255);
+    static readonly string GreenBg = Bg(96, 214, 140);
+    static readonly string AmberBg = Bg(242, 192, 82);
+    static readonly string RedBg = Bg(244, 108, 108);
 
-    static readonly string Ink = Fg(10, 10, 10);
-    static readonly string Border = Fg(60, 60, 60);
-    static readonly string Faint = Fg(105, 105, 105);
-    static readonly string Dim = Fg(150, 150, 150);
-    static readonly string Text = Fg(208, 208, 208);
-    static readonly string Bright = Fg(245, 245, 245);
-    static readonly string Thumb = Fg(220, 220, 220);
+    static readonly string Ink = Fg(12, 12, 20);
+    static readonly string Border = Fg(58, 58, 84);
+    static readonly string Faint = Fg(100, 100, 124);
+    static readonly string Dim = Fg(150, 150, 174);
+    static readonly string Text = Fg(214, 214, 228);
+    static readonly string Bright = Fg(248, 248, 252);
+    static readonly string Accent = Fg(162, 148, 255);
+    static readonly string Green = Fg(96, 214, 140);
+    static readonly string Amber = Fg(242, 192, 82);
+    static readonly string Red = Fg(244, 108, 108);
+    static readonly string Blue = Fg(112, 182, 246);
+    static readonly string WarnText = Fg(248, 220, 156);
+    static readonly string ErrorText = Fg(250, 176, 176);
 
-    const string Title = "Kronos CLI";
     const int MaxLines = 600;
     const int MarginX = 2;
     const int MarginY = 1;
     const int Indent = 12;
     const int Col0 = MarginX + 2;
+    const int FixedRows = 10;
+    const int SidebarWidth = 30;
+    const int SidebarMinInner = 92;
+
+    const string ActivityEmpty = "Nothing yet - what Kronos and the game do shows up here";
+    const string ProxyEmpty = "Proxy traffic shows up here once a client launches with the proxy";
 
     static readonly object sync = new();
     static readonly object draw = new();
@@ -47,12 +64,18 @@ internal static class Ui
     static readonly List<Entry> proxyLines = [];
     static readonly List<(string Key, string Value, Level Kind)> status = [];
 
-    static string hint = "";
+    static string menuTitle = "";
+    static List<MenuItem> menu = [];
+    static int selected;
+    static string next = "";
+    static Level nextLevel = Level.Info;
+
     static string inputLabel = "";
     static string inputExample = "";
     static string input = "";
     static IReadOnlyList<Button> inputButtons = [];
     static bool prompting;
+    static bool commandMode;
     static bool secret;
 
     static int focus;
@@ -60,7 +83,7 @@ internal static class Ui
     static readonly int[] maxOffset = new int[2];
     static readonly int[] paneTop = [0, 0];
     static readonly int[] paneHeight = [1, 1];
-    static int lastInner = 80;
+    static int lastPaneWidth = 80;
     static List<Hit> hits = [];
 
     static bool mouse;
@@ -95,7 +118,7 @@ internal static class Ui
         Console.RestoreInput();
     }
 
-    public static void Add(Level level, string message)
+    public static void Add(Level level, string message, string? topic = null, bool keep = false)
     {
         bool isProxy = message.StartsWith("Proxy:", StringComparison.Ordinal);
         if (!isProxy && level == Level.Detail) return;
@@ -107,12 +130,23 @@ internal static class Ui
         {
             int pane = isProxy ? 1 : 0;
             var list = isProxy ? proxyLines : activity;
-            var entry = new Entry(DateTime.Now, shown, text);
+            var entry = new Entry(DateTime.Now, shown, text, topic, keep);
             list.Add(entry);
             if (list.Count > MaxLines) list.RemoveRange(0, list.Count - MaxLines);
-            if (offset[pane] > 0) offset[pane] += Wrap(entry.Text, MessageWidth(lastInner)).Count;
+            if (offset[pane] > 0) offset[pane] += Wrap(entry.Text, MessageWidth(lastPaneWidth)).Count;
         }
         dirty = true;
+    }
+
+    public static void Resolve(string topic)
+    {
+        int removed;
+        lock (sync)
+        {
+            static bool Stale(Entry entry, string topic) => entry.Topic == topic && entry.Level is Level.Warn or Level.Error;
+            removed = activity.RemoveAll(e => Stale(e, topic)) + proxyLines.RemoveAll(e => Stale(e, topic));
+        }
+        if (removed > 0) dirty = true;
     }
 
     public static void SetStatus(string key, string value, Level kind)
@@ -126,24 +160,52 @@ internal static class Ui
         dirty = true;
     }
 
-    public static void SetHint(string text)
+    public static void RemoveStatus(string key)
     {
-        lock (sync) hint = text;
+        lock (sync) status.RemoveAll(s => s.Key == key);
         dirty = true;
     }
 
-    public static void Clear()
+    public static void SetMenu(string title, IReadOnlyList<MenuItem> items, int? select = null)
     {
         lock (sync)
         {
-            activity.Clear();
-            proxyLines.Clear();
+            if (title != menuTitle) selected = 0;
+            menuTitle = title;
+            menu = [.. items];
+            if (select is { } index) selected = index;
+            selected = Math.Clamp(selected, 0, Math.Max(0, menu.Count - 1));
+        }
+        dirty = true;
+    }
+
+    public static void SetNext(string text, Level level)
+    {
+        lock (sync)
+        {
+            next = text;
+            nextLevel = level;
+        }
+        dirty = true;
+    }
+
+    public static void ClearSession()
+    {
+        lock (sync)
+        {
+            activity.RemoveAll(e => !e.Keep);
+            proxyLines.RemoveAll(e => !e.Keep);
             offset[0] = offset[1] = 0;
         }
         dirty = true;
     }
 
-    public static string ReadLine(string label, bool secret = false, string example = "", IReadOnlyList<Button>? buttons = null)
+    public static string ReadCommand() => Read("› ", false, "", null, command: true);
+
+    public static string ReadLine(string label, bool secret = false, string example = "", IReadOnlyList<Button>? buttons = null) =>
+        Read(label, secret, example, buttons, command: false);
+
+    static string Read(string label, bool secret, string example, IReadOnlyList<Button>? buttons, bool command)
     {
         lock (sync)
         {
@@ -152,6 +214,7 @@ internal static class Ui
             input = "";
             inputButtons = buttons ?? [];
             Ui.secret = secret;
+            commandMode = command;
             prompting = true;
         }
         dirty = true;
@@ -163,6 +226,7 @@ internal static class Ui
         {
             result = (chosen ?? input).Trim();
             prompting = false;
+            commandMode = false;
             inputLabel = "";
             inputExample = "";
             input = "";
@@ -180,9 +244,10 @@ internal static class Ui
             try { key = System.Console.ReadKey(true); }
             catch { Thread.Sleep(50); continue; }
 
-            if (key.Key == ConsoleKey.Enter) return null;
-            lock (sync) OnKey((int)key.Key, key.KeyChar, 1);
+            string? done;
+            lock (sync) done = OnKey((int)key.Key, key.KeyChar, 1);
             dirty = true;
+            if (done != null) return done;
         }
         return null;
     }
@@ -206,9 +271,10 @@ internal static class Ui
             {
                 var key = record.Key;
                 if (key.KeyDown == 0) continue;
-                if (key.VirtualKey == 0x0D) return null;
-                lock (sync) OnKey(key.VirtualKey, (char)key.Char, Math.Max(1, (int)key.RepeatCount));
+                string? done;
+                lock (sync) done = OnKey(key.VirtualKey, (char)key.Char, Math.Max(1, (int)key.RepeatCount));
                 dirty = true;
+                if (done != null) return done;
             }
             else if (record.EventType == Console.MouseEvent && OnMouse(record.Mouse) is { } hit)
             {
@@ -242,22 +308,34 @@ internal static class Ui
         return keys;
     }
 
-    static void OnKey(int virtualKey, char ch, int repeat)
+    static string? OnKey(int virtualKey, char ch, int repeat)
     {
+        bool picking = commandMode && menu.Count > 0;
         switch (virtualKey)
         {
+            case 0x0D: return picking && input.Trim().Length == 0 ? menu[selected].Key : input;
             case 0x08: for (int i = 0; i < repeat && input.Length > 0; i++) input = input[..^1]; break;
-            case 0x1B: input = ""; break;
+            case 0x1B:
+                if (commandMode && input.Length == 0) return "";
+                input = "";
+                break;
             case 0x09: focus = 1 - focus; break;
             case 0x21: ScrollPane(focus, repeat * Math.Max(1, paneHeight[focus] - 1)); break;
             case 0x22: ScrollPane(focus, -repeat * Math.Max(1, paneHeight[focus] - 1)); break;
-            case 0x26: ScrollPane(focus, repeat); break;
-            case 0x28: ScrollPane(focus, -repeat); break;
+            case 0x26: if (picking) MoveSelection(-repeat); else ScrollPane(focus, repeat); break;
+            case 0x28: if (picking) MoveSelection(repeat); else ScrollPane(focus, -repeat); break;
             case 0x24: offset[focus] = maxOffset[focus]; break;
             case 0x23: offset[focus] = 0; break;
-            default: if (ch != '\0' && !char.IsControl(ch)) input += new string(ch, repeat); break;
+            default:
+                if (ch == '\0' || char.IsControl(ch)) break;
+                input += new string(ch, repeat);
+                if (picking && menu.FindIndex(item => item.Key == input.Trim()) is >= 0 and var typed) selected = typed;
+                break;
         }
+        return null;
     }
+
+    static void MoveSelection(int delta) => selected = ((selected + delta) % menu.Count + menu.Count) % menu.Count;
 
     static Hit? OnMouse(Console.MouseRecord record)
     {
@@ -282,6 +360,11 @@ internal static class Ui
                     ScrollToBar(dragPane, y);
                     dirty = true;
                 }
+                else if (HitAt(x, y) is { Kind: HitKind.Command, Item: >= 0 } hover && hover.Item != selected)
+                {
+                    selected = hover.Item;
+                    dirty = true;
+                }
                 return null;
             }
 
@@ -290,10 +373,7 @@ internal static class Ui
             if (!left) dragPane = -1;
             if (!pressed) return null;
 
-            Hit? found = null;
-            foreach (var hit in hits)
-                if (hit.Row == y && x >= hit.Left && x < hit.Right) found = hit;
-            if (found is not { } target) return null;
+            if (HitAt(x, y) is not { } target) return null;
 
             dirty = true;
             switch (target.Kind)
@@ -315,6 +395,14 @@ internal static class Ui
                     return target;
             }
         }
+    }
+
+    static Hit? HitAt(int x, int y)
+    {
+        Hit? found = null;
+        foreach (var hit in hits)
+            if (hit.Row == y && x >= hit.Left && x < hit.Right) found = hit;
+        return found;
     }
 
     static int? PaneAt(int y)
@@ -344,7 +432,7 @@ internal static class Ui
             {
                 if (w != lastWidth || h != lastHeight) { try { System.Console.Clear(); } catch { } }
                 lastWidth = w; lastHeight = h; lastSecond = second; dirty = false;
-                Write(Compose(w, h));
+                try { Write(Compose(w, h)); } catch { }
             }
             Thread.Sleep(30);
         }
@@ -358,36 +446,46 @@ internal static class Ui
         int inner = cardW - 4;
 
         List<Entry> act, prx;
-        List<(string, string, Level)> st;
+        List<(string Key, string Value, Level Kind)> st;
+        List<MenuItem> items;
         List<string> promptLines;
         IReadOnlyList<Button> buttons;
-        string hintCopy, example, shownInput;
-        bool prompt;
-        int activityH, proxyH, focused, leftWidth;
+        string title, example, shownInput, nextText;
+        Level nextKind;
+        bool prompt, command;
+        int focused, chosen, leftWidth;
         lock (sync)
         {
             st = [.. status];
-            hintCopy = hint;
+            items = [.. menu];
+            title = menuTitle;
+            chosen = selected;
+            nextText = next;
+            nextKind = nextLevel;
             example = inputExample;
             shownInput = secret ? new string('•', input.Length) : input;
             prompt = prompting;
+            command = commandMode;
             buttons = inputButtons;
 
             int buttonsWidth = buttons.Sum(b => b.Label.Length + 2) + Math.Max(0, buttons.Count - 1);
             leftWidth = Math.Max(8, inner - (buttonsWidth > 0 ? buttonsWidth + 1 : 0));
             promptLines = PromptLines(inputLabel, shownInput, prompt, leftWidth, h);
-
-            int bodyTotal = Math.Max(2, h - 2 * MarginY - 9 - Math.Max(0, promptLines.Count - 2));
-            proxyH = Math.Max(1, bodyTotal * 2 / 5);
-            activityH = Math.Max(1, bodyTotal - proxyH);
             act = [.. activity];
             prx = [.. proxyLines];
             focused = focus;
-            lastInner = inner;
         }
 
-        var actRows = PaneRows(act, inner, proxyPane: false);
-        var prxRows = PaneRows(prx, inner, proxyPane: true);
+        int bodyRows = Math.Max(4, h - FixedRows - Math.Max(0, promptLines.Count - 2));
+        bool sidebar = items.Count > 0 && inner >= SidebarMinInner && bodyRows >= items.Count + 1;
+        int paneW = sidebar ? inner - SidebarWidth - 3 : inner;
+        int paneX = Col0 + (sidebar ? SidebarWidth + 3 : 0);
+        int contentRows = bodyRows - 2;
+        int proxyH = Math.Max(1, contentRows / 3);
+        int activityH = Math.Max(1, contentRows - proxyH);
+
+        var actRows = PaneRows(act, paneW);
+        var prxRows = PaneRows(prx, paneW);
 
         int actOffset, prxOffset;
         lock (sync)
@@ -398,9 +496,12 @@ internal static class Ui
             maxOffset[1] = Math.Max(0, prxRows.Count - proxyH);
             actOffset = offset[0] = Math.Min(offset[0], maxOffset[0]);
             prxOffset = offset[1] = Math.Min(offset[1], maxOffset[1]);
+            lastPaneWidth = paneW;
         }
 
         string label = promptLines[^1];
+        if (command && shownInput.Length == 0 && items.Count > 0)
+            example = $"Enter = {items[Math.Clamp(chosen, 0, items.Count - 1)].Label}   or type a number";
         int room = leftWidth - 1 - label.Length;
         if (shownInput.Length > room) shownInput = room > 1 ? "…" + shownInput[^(room - 1)..] : "";
 
@@ -410,26 +511,42 @@ internal static class Ui
         rows.Add(TopBorder(cardW));
         rows.Add(Card(BrandSpans(inner), inner));
         rows.Add(Card(StatusSpans(st), inner));
+        rows.Add(Card(NextSpans(nextText, nextKind), inner));
 
-        int actTop = AddPane(rows, newHits, "ACTIVITY", 0, focused == 0, actRows, activityH, actOffset, inner);
-        int prxTop = AddPane(rows, newHits, "PROXY", 1, focused == 1, prxRows, proxyH, prxOffset, inner);
+        int bodyTop = rows.Count;
+        var paneLines = new List<List<Span>>(bodyRows);
+        int actTop = AddPane(paneLines, newHits, bodyTop, paneX, "ACTIVITY", 0, focused == 0, actRows, activityH, actOffset, paneW, ActivityEmpty);
+        int prxTop = AddPane(paneLines, newHits, bodyTop, paneX, "PROXY", 1, focused == 1, prxRows, proxyH, prxOffset, paneW, ProxyEmpty);
 
-        rows.Add(Card([new Span(new string('─', inner), Border)], inner));
+        var itemLines = new List<int>();
+        var sideLines = sidebar ? SidebarLines(title, items, chosen, command, paneLines.Count, itemLines) : null;
+        for (int i = 0; i < paneLines.Count; i++)
+        {
+            var line = paneLines[i];
+            if (sideLines != null) line = [.. sideLines[i], new Span(" │ ", Border), .. line];
+            rows.Add(Card(line, inner));
+        }
+        if (sidebar && command)
+            for (int i = 0; i < itemLines.Count; i++)
+                newHits.Add(new Hit(bodyTop + itemLines[i], Col0, Col0 + SidebarWidth, HitKind.Command, Value: items[i].Key, Item: i));
+
+        string rule = sidebar ? new string('─', SidebarWidth + 1) + "┴" + new string('─', paneW + 1) : new string('─', inner);
+        rows.Add(Card([new Span(rule, Border)], inner));
+
         if (promptLines.Count > 1)
         {
-            foreach (var line in promptLines.Take(promptLines.Count - 1)) rows.Add(Card([new Span(line, Dim)], inner));
+            foreach (var line in promptLines.Take(promptLines.Count - 1)) rows.Add(Card([new Span(line, Text)], inner));
         }
         else
         {
-            var targets = new List<(int Start, int End, string Key)>();
             int hintRow = rows.Count;
-            rows.Add(Card(HintSpans(hintCopy, targets), inner));
-            foreach (var (start, end, key) in targets)
-                newHits.Add(new Hit(hintRow, Col0 + start, Col0 + Math.Min(end, inner), HitKind.Command, Value: key));
+            rows.Add(Card(sidebar || items.Count == 0 || !command
+                ? KeyHelp(prompt, command, buttons.Count > 0)
+                : MenuChips(items, chosen, inner, hintRow, newHits), inner));
         }
 
         int inputRow = rows.Count;
-        var inputSpans = Fit(InputSpans(label, shownInput, example, prompt), leftWidth);
+        var inputSpans = Fit(InputSpans(label, shownInput, example, prompt, command), leftWidth);
         if (buttons.Count > 0)
         {
             int pos = leftWidth + 1;
@@ -438,7 +555,7 @@ internal static class Ui
             {
                 if (i > 0) { inputSpans.Add(new Span(" ", Faint)); pos++; }
                 string chip = $" {buttons[i].Label} ";
-                inputSpans.Add(new Span(chip, Ink, KeyBg));
+                inputSpans.Add(new Span(chip, Ink, i == 0 ? AccentBg : KeyBg));
                 newHits.Add(new Hit(inputRow, Col0 + pos, Col0 + pos + chip.Length, HitKind.Button, Button: buttons[i]));
                 pos += chip.Length;
             }
@@ -467,33 +584,33 @@ internal static class Ui
         return sb.ToString();
     }
 
-    static int AddPane(List<string> rows, List<Hit> newHits, string title, int pane, bool focused,
-        List<Span[]> lines, int count, int offset, int inner)
+    static int AddPane(List<List<Span>> lines, List<Hit> newHits, int bodyTop, int paneX, string title, int pane, bool focused,
+        List<Span[]> content, int count, int offset, int width, string empty)
     {
-        int tabRow = rows.Count;
-        rows.Add(Card(TabSpans(title, focused, offset, inner, out int noteStart, out int noteLength), inner));
-        newHits.Add(new Hit(tabRow, Col0, Col0 + inner, HitKind.Tab, pane));
+        int tab = lines.Count;
+        lines.Add(TabSpans(title, focused, offset, width, out int noteStart, out int noteLength));
+        newHits.Add(new Hit(bodyTop + tab, paneX, paneX + width, HitKind.Tab, pane));
         if (offset > 0 && noteLength > 0)
-            newHits.Add(new Hit(tabRow, Col0 + noteStart, Col0 + noteStart + noteLength, HitKind.Follow, pane));
+            newHits.Add(new Hit(bodyTop + tab, paneX + noteStart, paneX + noteStart + noteLength, HitKind.Follow, pane));
 
-        int top = rows.Count;
-        AppendPane(rows, lines, count, offset, inner);
+        int top = lines.Count;
+        AppendPane(lines, content, count, offset, width, empty);
         for (int row = top; row < top + count; row++)
         {
-            newHits.Add(new Hit(row, Col0, Col0 + inner - 2, HitKind.Body, pane));
-            newHits.Add(new Hit(row, Col0 + inner - 2, Col0 + inner + 2, HitKind.Bar, pane));
+            newHits.Add(new Hit(bodyTop + row, paneX, paneX + width - 2, HitKind.Body, pane));
+            newHits.Add(new Hit(bodyTop + row, paneX + width - 2, paneX + width + 2, HitKind.Bar, pane));
         }
-        return top;
+        return bodyTop + top;
     }
 
-    static List<Span[]> PaneRows(List<Entry> entries, int inner, bool proxyPane) =>
-        entries.SelectMany(entry => LineRows(entry, MessageWidth(inner), proxyPane)).ToList();
+    static List<Span[]> PaneRows(List<Entry> entries, int width) =>
+        entries.SelectMany(entry => LineRows(entry, MessageWidth(width))).ToList();
 
-    static int MessageWidth(int inner) => Math.Max(1, inner - 2 - Indent);
+    static int MessageWidth(int width) => Math.Max(1, width - 2 - Indent);
 
-    static void AppendPane(List<string> rows, List<Span[]> lines, int count, int offset, int inner)
+    static void AppendPane(List<List<Span>> rows, List<Span[]> lines, int count, int offset, int width, string empty)
     {
-        int content = inner - 2;
+        int content = width - 2;
         int end = lines.Count - offset;
         int start = Math.Max(0, end - count);
         int pad = count - (end - start);
@@ -507,21 +624,29 @@ internal static class Ui
             var spans = new List<Span>();
             int used = 0;
             if (i >= pad)
+            {
                 foreach (var span in lines[start + i - pad])
                 {
                     spans.Add(span);
                     used += span.Text.Length;
                 }
+            }
+            else if (lines.Count == 0 && i == 0)
+            {
+                string note = Clip(empty, content);
+                spans.Add(new Span(note, Faint));
+                used = note.Length;
+            }
 
             spans.Add(new Span(new string(' ', Math.Max(0, content - used) + 1), Faint));
-            spans.Add(scrollable && i >= thumbTop && i < thumbTop + thumbSize
-                ? new Span("┃", Thumb)
+            spans.Add(!scrollable ? new Span(" ", Faint)
+                : i >= thumbTop && i < thumbTop + thumbSize ? new Span("┃", Accent)
                 : new Span("│", Border));
-            rows.Add(Card(spans, inner));
+            rows.Add(spans);
         }
     }
 
-    static IEnumerable<Span[]> LineRows(Entry line, int messageWidth, bool proxyPane)
+    static IEnumerable<Span[]> LineRows(Entry line, int messageWidth)
     {
         var parts = Wrap(line.Text, messageWidth);
         string color = TextColor(line.Level);
@@ -538,6 +663,86 @@ internal static class Ui
             yield return [new Span(new string(' ', Indent), Faint), new Span(parts[i], color)];
     }
 
+    static List<List<Span>> SidebarLines(string title, List<MenuItem> items, int chosen, bool command, int count, List<int> itemLines)
+    {
+        var lines = new List<List<Span>>();
+        void Add(List<Span> spans) => lines.Add(Fit(spans, SidebarWidth, Side));
+
+        Add([new Span($" {title.ToUpperInvariant()} ", command ? Ink : Dim, command ? AccentBg : ChipBg)]);
+        if (count >= items.Count + 2) Add([]);
+
+        for (int i = 0; i < items.Count; i++)
+        {
+            itemLines.Add(lines.Count);
+            if (i == chosen)
+                lines.Add(Fit(
+                [
+                    new Span("▌", Accent, SelectBg),
+                    new Span($" {items[i].Key} ", Ink, command ? AccentBg : KeyBg),
+                    new Span($" {items[i].Label}", Bright, SelectBg),
+                ], SidebarWidth, SelectBg));
+            else
+                Add(
+                [
+                    new Span(" ", Faint),
+                    new Span($" {items[i].Key} ", command ? Text : Faint, ChipBg),
+                    new Span($" {items[i].Label}", command ? Text : Faint),
+                ]);
+        }
+
+        if (chosen >= 0 && chosen < items.Count && lines.Count < count - 1)
+        {
+            Add([]);
+            foreach (string part in Wrap(items[chosen].Description, SidebarWidth - 2))
+            {
+                if (lines.Count >= count) break;
+                Add([new Span(" " + part, Dim)]);
+            }
+        }
+
+        while (lines.Count < count) Add([]);
+        return lines.Take(count).ToList();
+    }
+
+    static List<Span> MenuChips(List<MenuItem> items, int chosen, int width, int row, List<Hit> newHits)
+    {
+        int Needed(int gap) => items.Sum(item => item.Key.Length + 2 + 1 + (item.Short ?? item.Label).Length + gap);
+        int spacing = Needed(2) <= width ? 2 : Needed(1) <= width ? 1 : -1;
+
+        var spans = new List<Span>();
+        int pos = 0;
+        for (int i = 0; i < items.Count; i++)
+        {
+            string chip = $" {items[i].Key} ";
+            string text = spacing < 0
+                ? i == chosen ? $" {items[i].Short ?? items[i].Label} " : " "
+                : $" {items[i].Short ?? items[i].Label}{new string(' ', spacing)}";
+            bool on = i == chosen;
+            spans.Add(new Span(chip, Ink, on ? AccentBg : KeyBg));
+            spans.Add(new Span(text, on ? Bright : Dim));
+            newHits.Add(new Hit(row, Col0 + pos, Col0 + pos + chip.Length + text.TrimEnd().Length, HitKind.Command, Value: items[i].Key, Item: i));
+            pos += chip.Length + text.Length;
+        }
+        return spans;
+    }
+
+    static List<Span> KeyHelp(bool prompt, bool command, bool hasButtons)
+    {
+        (string Key, string What)[] keys = command
+            ? [("↑↓", "choose"), ("Enter", "select"), ("Esc", "back"), ("?", "help"), ("Tab", "switch pane"), ("wheel/PgUp/PgDn", "scroll")]
+            : prompt
+                ? [("Enter", "confirm"), ("empty Enter", "keeps what's shown in [ ]"), ("Esc", "clear typing"), .. hasButtons ? [("click", "a button on the right")] : Array.Empty<(string, string)>()]
+                : [("", "working…")];
+
+        var spans = new List<Span>();
+        foreach (var (key, what) in keys)
+        {
+            if (key.Length > 0) spans.Add(new Span(key, Accent));
+            spans.Add(new Span($" {what}    ", Dim));
+        }
+        return spans;
+    }
+
     static List<string> PromptLines(string label, string value, bool prompting, int width, int height)
     {
         if (!prompting) return [label];
@@ -545,7 +750,7 @@ internal static class Ui
         var lines = Wrap(label, width);
         if (lines[^1].Length + value.Length >= width) lines.Add("");
 
-        int maxExtra = Math.Max(0, height - 2 * MarginY - 11);
+        int maxExtra = Math.Max(0, height - 2 * MarginY - 12);
         if (lines.Count - 2 > maxExtra) lines = [.. lines.Take(maxExtra + 1), lines[^1]];
         return lines;
     }
@@ -569,7 +774,7 @@ internal static class Ui
         return lines;
     }
 
-    static List<Span> Fit(IEnumerable<Span> spans, int width)
+    static List<Span> Fit(IEnumerable<Span> spans, int width, string? bg = null)
     {
         var fitted = new List<Span>();
         int used = 0;
@@ -577,23 +782,26 @@ internal static class Ui
         {
             if (used >= width) break;
             string text = used + span.Text.Length > width ? Clip(span.Text, width - used) : span.Text;
-            fitted.Add(span with { Text = text });
+            fitted.Add(span with { Text = text, Bg = span.Bg ?? bg });
             used += text.Length;
         }
-        if (used < width) fitted.Add(new Span(new string(' ', width - used), Faint));
+        if (used < width) fitted.Add(new Span(new string(' ', width - used), Faint, bg));
         return fitted;
     }
 
-    static Span[] BrandSpans(int inner)
+    static List<Span> BrandSpans(int inner)
     {
         string clock = DateTime.Now.ToString("HH:mm:ss");
-        int gap = Math.Max(1, inner - (Title.Length + 2) - clock.Length);
-        return
-        [
-            new Span($" {Title} ", Ink, LightBg),
-            new Span(new string(' ', gap), Dim),
-            new Span(clock, Dim),
-        ];
+        var spans = new List<Span>
+        {
+            new(" ◆ KRONOS ", Ink, AccentBg),
+            new(" CLI ", Accent, ChipBg),
+            new("   OGFN launcher", Faint),
+        };
+        int used = spans.Sum(s => s.Text.Length);
+        spans.Add(new Span(new string(' ', Math.Max(1, inner - used - clock.Length)), Faint));
+        spans.Add(new Span(clock, Dim));
+        return spans;
     }
 
     static List<Span> StatusSpans(List<(string Key, string Value, Level Kind)> badges)
@@ -601,96 +809,65 @@ internal static class Ui
         var spans = new List<Span>();
         if (badges.Count == 0)
         {
-            spans.Add(new Span("waiting for configuration", Faint));
+            spans.Add(new Span("checking your setup…", Faint));
             return spans;
         }
         foreach (var (key, value, kind) in badges)
         {
             spans.Add(new Span($" {key.ToUpperInvariant()} ", Dim, ChipBg));
             spans.Add(new Span(" ", Text));
-            spans.Add(kind switch
-            {
-                Level.Ok => new Span($"✓ {value}", Bright),
-                Level.Warn => new Span($"▲ {value}", Bright),
-                Level.Error => new Span($"✕ {value}", Bright),
-                Level.Detail => new Span(value, Faint),
-                _ => new Span(value, Text),
-            });
+            if (kind is Level.Ok or Level.Warn or Level.Error) spans.Add(new Span("● ", LevelColor(kind)));
+            spans.Add(new Span(value, kind == Level.Detail ? Faint : Text));
             spans.Add(new Span("   ", Text));
         }
         return spans;
     }
 
-    static Span[] TabSpans(string label, bool focused, int offset, int inner, out int noteStart, out int noteLength)
+    static List<Span> NextSpans(string text, Level level)
     {
-        string note = offset > 0
-            ? focused ? "scrolled up · End to follow" : "scrolled up"
-            : focused ? "scroll with the wheel or PgUp/PgDn · Tab switches" : "";
+        if (text.Length == 0) return [];
+        string bg = level switch
+        {
+            Level.Ok => GreenBg,
+            Level.Warn => AmberBg,
+            Level.Error => RedBg,
+            _ => AccentBg,
+        };
+        return [new(" NEXT STEP ", Ink, bg), new("  ", Text), new(text, level is Level.Ok or Level.Warn or Level.Error ? LevelColor(level) : Bright)];
+    }
+
+    static List<Span> TabSpans(string label, bool focused, int offset, int width, out int noteStart, out int noteLength)
+    {
+        string note = offset > 0 ? focused ? "scrolled up · End to follow" : "scrolled up" : "";
         int noteWidth = note.Length == 0 ? 0 : note.Length + 3;
-        int dashes = Math.Max(0, inner - (label.Length + 2) - 1 - noteWidth);
+        int dashes = Math.Max(0, width - (label.Length + 2) - 1 - noteWidth);
         noteStart = label.Length + 2 + 1 + dashes;
         noteLength = note.Length == 0 ? 0 : note.Length + 2;
 
         var spans = new List<Span>
         {
-            new($" {label} ", focused ? Ink : Dim, focused ? LightBg : ChipBg),
+            new($" {label} ", focused ? Ink : Dim, focused ? AccentBg : ChipBg),
             new(" ", Border),
             new(new string('─', dashes), Border),
         };
         if (note.Length > 0)
         {
-            spans.Add(new($" {note} ", offset > 0 ? Bright : Faint));
+            spans.Add(new($" {note} ", Amber));
             spans.Add(new("─", Border));
-        }
-        return [.. spans];
-    }
-
-    static List<Span> HintSpans(string hintText, List<(int Start, int End, string Key)> targets)
-    {
-        var spans = new List<Span>();
-        if (string.IsNullOrEmpty(hintText)) return spans;
-
-        int pos = 0;
-        int i = 0;
-        while (i < hintText.Length)
-        {
-            if (hintText[i] == '[')
-            {
-                int close = hintText.IndexOf(']', i);
-                if (close > i)
-                {
-                    string key = hintText[(i + 1)..close];
-                    int next = hintText.IndexOf('[', close + 1);
-                    if (next < 0) next = hintText.Length;
-                    string chip = $" {key} ";
-                    string text = hintText[(close + 1)..next];
-
-                    spans.Add(new Span(chip, Ink, KeyBg));
-                    spans.Add(new Span(text, Dim));
-                    targets.Add((pos, pos + chip.Length + text.TrimEnd().Length, key));
-                    pos += chip.Length + text.Length;
-                    i = next;
-                    continue;
-                }
-            }
-            int after = hintText.IndexOf('[', i + 1);
-            if (after < 0) after = hintText.Length;
-            spans.Add(new Span(hintText[i..after], Dim));
-            pos += after - i;
-            i = after;
         }
         return spans;
     }
 
-    static Span[] InputSpans(string label, string value, string example, bool prompting)
+    static Span[] InputSpans(string label, string value, string example, bool prompting, bool command)
     {
         if (!prompting && label.Length == 0 && value.Length == 0)
-            return [new Span("press a key", Faint)];
+            return [new Span("working…", Faint)];
+        string labelColor = command ? Accent : Text;
         if (value.Length > 0)
-            return [new Span(label, Dim), new Span(value, Bright)];
+            return [new Span(label, labelColor), new Span(value, Bright)];
         if (example.Length > 0)
-            return [new Span(label, Dim), new Span(example, Faint)];
-        return [new Span(label, Dim)];
+            return [new Span(label, labelColor), new Span(example, Faint)];
+        return [new Span(label, labelColor)];
     }
 
     static string Card(IReadOnlyList<Span> spans, int inner) =>
@@ -739,18 +916,27 @@ internal static class Ui
 
     static Span GlyphSpan(Level level) => level switch
     {
-        Level.Error => new Span("✕", Ink, LightBg),
-        Level.Warn => new Span("▲", Ink, GreyBg),
-        Level.Ok => new Span("✓", Bright),
-        Level.Info => new Span("•", Dim),
+        Level.Error => new Span("✕", Red),
+        Level.Warn => new Span("▲", Amber),
+        Level.Ok => new Span("✓", Green),
+        Level.Info => new Span("•", Blue),
         Level.Detail => new Span("·", Faint),
-        Level.Proxy => new Span("»", Text),
+        Level.Proxy => new Span("»", Accent),
         _ => new Span(" ", Dim),
+    };
+
+    static string LevelColor(Level level) => level switch
+    {
+        Level.Ok => Green,
+        Level.Warn => Amber,
+        Level.Error => Red,
+        _ => Blue,
     };
 
     static string TextColor(Level level) => level switch
     {
-        Level.Error or Level.Warn => Bright,
+        Level.Error => ErrorText,
+        Level.Warn => WarnText,
         Level.Detail => Faint,
         _ => Text,
     };
@@ -766,5 +952,119 @@ internal static class Ui
     static void Write(string s)
     {
         lock (draw) { try { System.Console.Out.Write(s); System.Console.Out.Flush(); } catch { } }
+    }
+}
+
+internal static class Log
+{
+    public static readonly string FilePath = Path.Combine(AppContext.BaseDirectory, "launcher.log");
+
+    static readonly object Sync = new();
+    static bool atPrompt;
+
+    [ThreadStatic] static int essential;
+
+    public readonly struct EssentialScope : IDisposable
+    {
+        public void Dispose() => essential--;
+    }
+
+    public static EssentialScope Essential()
+    {
+        essential++;
+        return new EssentialScope();
+    }
+
+    public static void Reset()
+    {
+        try { File.WriteAllText(FilePath, ""); } catch (Exception e) when (e is IOException or UnauthorizedAccessException) { }
+    }
+
+    public static void Info(string message) => Emit(Ui.Level.Info, "[*]", ConsoleColor.Cyan, message);
+    public static void Ok(string message) => Emit(Ui.Level.Ok, "[+]", ConsoleColor.Green, message);
+    public static void Warn(string message, string? topic = null) => Emit(Ui.Level.Warn, "[!]", ConsoleColor.Yellow, message, topic);
+    public static void Error(string message, string? topic = null) => Emit(Ui.Level.Error, "[-]", ConsoleColor.Red, message, topic);
+    public static void Detail(string message) => Emit(Ui.Level.Detail, "[.]", ConsoleColor.DarkGray, message);
+
+    public static void Resolve(string topic)
+    {
+        if (Ui.Active) Ui.Resolve(topic);
+    }
+
+    public static void Raw(string text)
+    {
+        if (Ui.Active)
+        {
+            foreach (var line in text.Split('\n'))
+                if (line.Trim().Length > 0) Ui.Add(Ui.Level.Plain, line.TrimEnd('\r'), keep: essential > 0);
+            return;
+        }
+        lock (Sync) System.Console.WriteLine(text);
+    }
+
+    public static string? ReadCommand()
+    {
+        if (Ui.Active)
+        {
+            string command = Ui.ReadCommand();
+            Append("> " + command);
+            return command;
+        }
+
+        lock (Sync) { System.Console.Write("> "); atPrompt = true; }
+        string? typed = System.Console.ReadLine()?.Trim();
+        lock (Sync) { atPrompt = false; if (typed != null) Append("> " + typed); }
+        return typed;
+    }
+
+    public static string? ReadValue(string label, bool secret = false, string example = "", IReadOnlyList<Ui.Button>? buttons = null)
+    {
+        if (Ui.Active)
+        {
+            string value = Ui.ReadLine(label, secret, example, buttons);
+            if (value.Length > 0) Append(label + (secret ? "***" : value));
+            return value.Length == 0 ? null : value;
+        }
+
+        lock (Sync) System.Console.Write(label);
+        string? typed = System.Console.ReadLine()?.Trim();
+        if (!string.IsNullOrEmpty(typed)) lock (Sync) Append(label + (secret ? "***" : typed));
+        return string.IsNullOrEmpty(typed) ? null : typed;
+    }
+
+    static readonly Ui.Button[] YesNo = [new("Yes", "y"), new("No", "n")];
+
+    public static bool Confirm(string question, bool defaultYes)
+    {
+        string? answer = ReadValue($"{question} [{(defaultYes ? "Y/n" : "y/N")}] ", buttons: YesNo);
+        return answer == null ? defaultYes : answer.ToLowerInvariant() is "y" or "yes";
+    }
+
+    static void Emit(Ui.Level level, string tag, ConsoleColor color, string message, string? topic = null)
+    {
+        Append($"{tag} {message}");
+        if (Ui.Active)
+        {
+            Ui.Add(level, message, topic, keep: essential > 0 || topic != null);
+            return;
+        }
+
+        lock (Sync)
+        {
+            if (atPrompt) System.Console.Write("\r  \r");
+            System.Console.ForegroundColor = ConsoleColor.DarkGray;
+            System.Console.Write($"{DateTime.Now:HH:mm:ss} ");
+            System.Console.ForegroundColor = color;
+            System.Console.Write(tag);
+            System.Console.ResetColor();
+            System.Console.WriteLine($" {message}");
+            if (atPrompt) System.Console.Write("> ");
+        }
+    }
+
+    static void Append(string line)
+    {
+        try { File.AppendAllText(FilePath, $"[{DateTime.Now:HH:mm:ss}] {line}{Environment.NewLine}"); }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { }
     }
 }
